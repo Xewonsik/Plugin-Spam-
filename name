@@ -1,0 +1,8 @@
+__id__ = "spam_troll"
+__name__ = "Spam"
+__author__ = "@Xewonsik"
+__version__ = "1.1.0"
+__description__ = """Тролит жертву спамом сообщений (версия с матом), пиши в чат .troll (чтобы остановить спам, напиши .stoptroll)"""
+
+__icon__ = "ksdjofsjfosdfjosijf/92"
+__min_version__ = "11.12.0"
