@@ -1,0 +1,188 @@
+class TrollPlugin(BasePlugin):
+    def __init__(self):
+        super().__init__()
+        self._cancel_events = {}
+
+    def on_plugin_load(self):
+        self.add_on_send_message_hook()
+        self.log("Spam загружен!")
+
+    def _get_all_phrases(self):
+        """Собирает стандартные и/или пользовательские фразы в один список."""
+        custom_phrases_pi = []
+        custom_phrase_count = self.get_setting("custom_phrase_count", 0)
+        for i in range(1, custom_phrase_count + 1):
+            phrase = self.get_setting(f"custom_phrase_{i}", "").strip()
+            if phrase:
+                custom_phrases_pi.append(phrase)
+        
+        use_only_custom_pi = self.get_setting("only_custom_phrases", False)
+        
+        if use_only_custom_pi:
+            
+            return custom_phrases_pi
+        else:
+            all_pi_phrases = DEFAULT_TROLL_PHRASES[:]
+            all_pi_phrases.extend(custom_phrases_pi)
+            return all_pi_phrases
+
+    def _refresh_settings_page(self):
+        """Пересобирает страницу настроек, чтобы отобразить изменения."""
+        try:
+            fragment = get_last_fragment()
+            if fragment and hasattr(fragment, "rebuildAllFragments"):
+                fragment.rebuildAllFragments(True)
+        except Exception as e:
+            self.log(f"Не удалось обновить страницу настроек: {e}")
+
+    def _add_phrase(self, view):
+        """Увеличивает счетчик фраз и обновляет UI."""
+        count = self.get_setting("custom_phrase_count", 0)
+        self.set_setting("custom_phrase_count", count + 1)
+        self._refresh_settings_page()
+
+    def _remove_phrase(self, view, index_to_remove):
+        """Удаляет фразу по индексу и сдвигает остальные."""
+        count = self.get_setting("custom_phrase_count", 0)
+        
+        for i in range(index_to_remove, count):
+            next_phrase = self.get_setting(f"custom_phrase_{i + 1}", "")
+            self.set_setting(f"custom_phrase_{i}", next_phrase)
+        
+        self.set_setting(f"custom_phrase_{count}", "")
+        self.set_setting("custom_phrase_count", count - 1)
+        self._refresh_settings_page()
+
+    def create_settings(self):
+        """Создаем страницу настроек для плагина."""
+        settings_list = [
+            Header(text="Основные настройки"),
+            Input(
+                key="delay_ms", text="Задержка (мс)", default="200",
+                subtext="Рекомендуется не менее 200 мс.",
+                icon="msg_recent_solar"
+            ),
+            Input(
+                key="count", text="Количество сообщений", default="20",
+                subtext="Сколько сообщений отправить за раз.",
+                icon="chats_replies_solar"
+            ),
+            Switch(
+                key="only_custom_phrases",
+                text="Использовать только свои фразы",
+                subtext="Если включено, встроенные оскорбления использоваться не будут.",
+                default=False,
+                icon="filter_custom_solar"
+            ),
+            Divider(text="Команды: .troll - начать, .stoptroll - остановить. @PluginExtraGram | @xewonsik"),
+            Header(text="Пользовательские фразы")
+        ]
+        
+        custom_phrase_count = self.get_setting("custom_phrase_count", 0)
+        display_count = max(1, custom_phrase_count)
+
+        for i in range(1, display_count + 1):
+            settings_list.extend([
+                Input(
+                    key=f"custom_phrase_{i}",
+                    text=f"Своя фраза #{i}",
+                    default="",
+                    icon="msg_edit_solar"
+                ),
+            ])
+            
+            if i <= custom_phrase_count and custom_phrase_count > 0:
+                settings_list.append(Text(
+                    text=f"Удалить фразу #{i}",
+                    icon="msg_delete_solar",
+                    red=True,
+                    on_click=lambda view, index=i: self._remove_phrase(view, index)
+                ))
+            settings_list.append(Divider())
+
+        settings_list.append(Text(
+            text="Добавить еще фразу",
+            icon="msg_addfolder_solar",
+            accent=True,
+            on_click=self._add_phrase
+        ))
+
+        return settings_list
+
+    def _troll_worker(self, peer_id, delay_ms, count, cancel_event):
+        """Эта функция выполняется в отдельном потоке, чтобы не морозить приложение."""
+        try:
+            all_phrases = self._get_all_phrases()
+            if not all_phrases:
+                run_on_ui_thread(lambda: BulletinHelper.show_error("Нет фраз для отправки! Добавьте их в настройках.", get_last_fragment()))
+                return 
+
+            phrases_to_send = random.sample(all_phrases, min(count, len(all_phrases)))
+            
+            for _ in range(count):
+                if cancel_event.is_set():
+                    break 
+                
+                if not phrases_to_send:
+                    
+                    pi_random_phrase = random.choice(all_phrases)
+                else:
+                    pi_random_phrase = phrases_to_send.pop(0)
+                
+                send_message({"peer": peer_id, "message": pi_random_phrase})
+                time.sleep(delay_ms / 1000.0)
+            
+            
+            if not cancel_event.is_set():
+                run_on_ui_thread(lambda: BulletinHelper.show_success("Троллинг завершен!", get_last_fragment()))
+        except Exception as e:
+            self.log(f"Ошибка в потоке троллинга: {e}")
+            run_on_ui_thread(lambda: BulletinHelper.show_error(f"Ошибка: {e}", get_last_fragment()))
+        finally:
+            
+            if self._cancel_events.get(peer_id) is cancel_event:
+                del self._cancel_events[peer_id]
+
+    def on_send_message_hook(self, account, params: Any) -> HookResult:
+        if not isinstance(params.message, str):
+            return HookResult()
+
+        msg = params.message.strip().lower()
+        peer_id = params.peer
+
+        if msg == ".troll":
+            if peer_id in self._cancel_events:
+                BulletinHelper.show_error("Троллинг в этом чате уже запущен.", get_last_fragment())
+                return HookResult(strategy=HookStrategy.CANCEL)
+
+            try:
+                delay_pi = int(self.get_setting("delay_ms", "200"))
+                count_pi = int(self.get_setting("count", "20"))
+                if delay_pi < 0 or count_pi <= 0:
+                    raise ValueError("Некорректные значения в настройках.")
+            except ValueError:
+                BulletinHelper.show_error("Ошибка в настройках! Проверьте, что введены числа.", get_last_fragment())
+                return HookResult(strategy=HookStrategy.CANCEL)
+
+            cancel_event = threading.Event()
+            self._cancel_events[peer_id] = cancel_event
+
+            threading.Thread(
+                target=self._troll_worker,
+                args=(peer_id, delay_pi, count_pi, cancel_event),
+                daemon=True
+            ).start()
+            
+            BulletinHelper.show_info("Троллинг запущен...", get_last_fragment())
+            return HookResult(strategy=HookStrategy.CANCEL)
+
+        elif msg == ".stoptroll":
+            if peer_id in self._cancel_events:
+                
+                self._cancel_events[peer_id].set()
+                BulletinHelper.show_success("Троллинг остановлен.", get_last_fragment())
+            else:
+                BulletinHelper.show_info("В этом чате нет активного троллинга.", get_last_fragment())
+            return HookResult(strategy=HookStrategy.CANCEL)
+
+        return HookResult()
